@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<title>OAG QR Scanner</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;background:#111827;color:#fff;font-family:Sarabun,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{min-height:100dvh;padding:calc(14px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));display:flex;flex-direction:column}
+.head{display:flex;align-items:center;gap:11px;margin-bottom:11px}.mark{width:48px;height:48px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(145deg,#F59A3F,#D85F0B);font-size:24px;box-shadow:0 8px 20px #0004}
+h1{font-size:20px;margin:0}.sub{font-size:12px;color:#F6C99F;margin-top:3px}
+.reader{position:relative;flex:1;min-height:52vh;border-radius:24px;overflow:hidden;background:#030712;border:1px solid #374151;box-shadow:0 18px 40px #0005}
+video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#030712}
+.scanbox{position:absolute;left:12%;right:12%;top:24%;bottom:24%;border:3px solid #F59A3F;border-radius:20px;box-shadow:0 0 0 9999px #0005;pointer-events:none}
+.scanline{position:absolute;left:15%;right:15%;top:50%;height:2px;background:#fff8;box-shadow:0 0 12px #fff}
+.status{margin-top:11px;padding:12px 14px;border-radius:16px;background:#1F2937;border:1px solid #374151;font-weight:800;font-size:14px;line-height:1.45}
+.status.good{background:#0D3A31;border-color:#176B5B;color:#CFF9ED}.status.warn{background:#4A3210;border-color:#8A611B;color:#FFE6B4}.status.bad{background:#4B1F23;border-color:#8B353C;color:#FFD7DB}
+.tools{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}.tools button{min-height:50px;border-radius:15px;border:1px solid #4B5563;background:#fff;color:#1F2937;font-weight:900;font-size:15px}
+.tools .primary{background:#E8751A;color:#fff;border-color:#E8751A}.manual{display:flex;gap:8px;margin-top:9px}.manual input{min-width:0;flex:1;height:46px;border:0;border-radius:14px;padding:0 12px;font-size:15px}.manual button{border:0;border-radius:14px;background:#E8751A;color:#fff;font-weight:900;padding:0 15px}
+.foot{text-align:center;color:#9CA3AF;font-size:11px;margin-top:8px;line-height:1.45}canvas{display:none}
+</style>
+</head>
+<body>
+<div class="head"><div class="mark">⚖</div><div><h1 id="title">สแกน QR สำนวน</h1><div class="sub">OAG • HTTPS Scanner</div></div></div>
+<div class="reader"><video id="video" playsinline muted autoplay></video><canvas id="canvas"></canvas><div class="scanbox"></div><div class="scanline"></div></div>
+<div id="status" class="status">กำลังเตรียมกล้อง...</div>
+<div class="tools"><button id="startBtn" class="primary">เปิดกล้อง / เปิดใหม่</button><button id="closeBtn">กลับระบบ</button></div>
+<div class="manual"><input id="manual" autocomplete="off" placeholder="หรือวาง/ยิงรหัสด้วยปืน"><button id="sendBtn">ส่ง</button></div>
+<div class="foot">ถือ QR เดิมค้างไว้จะไม่ยิงซ้ำ • ต้องเอา QR ออกจากกรอบก่อนจึงจะอ่านตัวเดิมใหม่ได้<br>หน้านี้ไม่เก็บข้อมูลสำนวน และไม่ส่งรายละเอียดสำนวนไป GitHub</div>
+<script src="./vendor/jsQR.js"></script>
+<script>
+(()=>{"use strict";
+const q=new URLSearchParams(location.search);
+const purpose=q.get("purpose")||"scan", channel=q.get("channel")||"", openerOrigin=q.get("openerOrigin")||"*";
+const titles={inspect:"สแกนดูข้อมูลสำนวน","mail-single":"สแกนสำนวนเข้าทะเบียนส่ง","mail-multi":"สแกนหลายสำนวนเข้าชุดส่ง",scan:"สแกนย้ายสำนวน"};
+document.getElementById("title").textContent=titles[purpose]||titles.scan;
+const video=document.getElementById("video"),canvas=document.getElementById("canvas"),ctx=canvas.getContext("2d",{willReadFrequently:true}),statusEl=document.getElementById("status");
+let stream=null,running=false,closing=false,raf=0,lastFrame=0,lockedRaw="",lastSeenAt=0;
+function status(msg,tone=""){statusEl.textContent=msg;statusEl.className="status "+tone}
+function post(type,extra={}){try{if(window.opener&&!window.opener.closed)window.opener.postMessage(Object.assign({type,purpose,channel},extra),openerOrigin)}catch(e){}}
+async function stopCamera(){running=false;if(raf)cancelAnimationFrame(raf);raf=0;if(stream){for(const t of stream.getTracks())try{t.stop()}catch(e){}stream=null}video.srcObject=null}
+function sendRaw(raw,manual=false){raw=String(raw||"").trim();if(!raw||closing)return;const now=Date.now();if(!manual&&raw===lockedRaw){lastSeenAt=now;return}if(!manual){lockedRaw=raw;lastSeenAt=now}status("อ่านรหัสแล้ว • กำลังส่งให้ระบบ...","warn");post("OAG_PHYSICAL_SCAN",{raw})}
+function loop(ts){if(!running)return;raf=requestAnimationFrame(loop);if(ts-lastFrame<95)return;lastFrame=ts;if(video.readyState<2)return;
+  const w=video.videoWidth,h=video.videoHeight;if(!w||!h)return;
+  const side=Math.floor(Math.min(w,h)*0.70),sx=Math.max(0,Math.floor((w-side)/2)),sy=Math.max(0,Math.floor((h-side)/2));
+  canvas.width=side;canvas.height=side;ctx.drawImage(video,sx,sy,side,side,0,0,side,side);
+  try{const img=ctx.getImageData(0,0,side,side),code=window.jsQR&&jsQR(img.data,side,side,{inversionAttempts:"dontInvert"});if(code&&code.data){sendRaw(code.data,false)}else if(lockedRaw&&Date.now()-lastSeenAt>900){lockedRaw="";}}catch(e){}
+}
+async function startCamera(){closing=false;await stopCamera();lockedRaw="";lastSeenAt=0;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){status("อุปกรณ์นี้ไม่รองรับกล้องผ่านเว็บ","bad");return}
+  try{status("กำลังขอสิทธิ์กล้อง...","warn");stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}}});video.srcObject=stream;await video.play();running=true;status("กล้องพร้อม • เล็ง QR ให้อยู่กลางกรอบ","good");raf=requestAnimationFrame(loop)}
+  catch(e){status("เปิดกล้องไม่สำเร็จ • โปรดอนุญาต Camera ใน Safari แล้วกด “เปิดกล้อง / เปิดใหม่”","bad")}
+}
+async function closeScanner(){if(closing)return;closing=true;post("OAG_SCANNER_CLOSING");status("กำลังปิดกล้อง...","warn");await stopCamera();setTimeout(()=>{try{window.close()}catch(e){}setTimeout(()=>{if(!window.closed)history.back()},120)},40)}
+function manualSend(){const i=document.getElementById("manual"),v=i.value.trim();i.value="";if(v)sendRaw(v,true)}
+window.addEventListener("message",e=>{if(openerOrigin!=="*"&&e.origin!==openerOrigin)return;const d=e.data||{};if(channel&&d.channel!==channel)return;if(d.type==="OAG_SCANNER_FEEDBACK")status(d.message||"พร้อมสแกนต่อ",d.tone||"good");if(d.type==="OAG_SCANNER_CLOSE_REQUEST")closeScanner()});
+document.getElementById("startBtn").addEventListener("click",startCamera);document.getElementById("closeBtn").addEventListener("click",closeScanner);document.getElementById("sendBtn").addEventListener("click",manualSend);document.getElementById("manual").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();manualSend()}});
+window.addEventListener("pagehide",()=>{if(!closing){closing=true;post("OAG_SCANNER_CLOSING")}stopCamera()});
+setTimeout(startCamera,220);
+})();
+</script>
+</body></html>
